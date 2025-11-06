@@ -1,212 +1,152 @@
 import express from "express";
 import axios from "axios";
+import cache from "memory-cache";
+import https from "https";
 import dotenv from "dotenv";
 
 dotenv.config();
-
 const router = express.Router();
+const agent = new https.Agent({ keepAlive: true });
+const CACHE_TIME = 60 * 1000;
 
 const API_KEY = process.env.API_KEY;
 
-// /weather/nowWeather?city=마루마루 지금 날씨
+// ✅ 기본 좌표 (도쿄도 치요다구)
+const DEFAULT_LAT = 35.6938403;
+const DEFAULT_LON = 139.753369;
+const DEFAULT_PREF = "東京都";
+const DEFAULT_CITY = "千代田区";
+const DEFAULT_COUNTRY = "日本";
+
+// ✅ 날씨 요청
+const fetchWeather = async (city, lat, lon) => {
+  let url;
+
+  if (lat && lon) {
+    url = `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${API_KEY}&units=metric&lang=ja`;
+  } else {
+    url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(
+      city
+    )}&appid=${API_KEY}&units=metric&lang=ja`;
+  }
+
+  console.log(`🌐 [OpenWeather 요청] ${url}`);
+  const { data } = await axios.get(url, { httpsAgent: agent });
+  return data;
+};
+
+// ✅ 역지오코딩
+const reverseGeocode = async (lat, lon) => {
+  const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=ja`;
+  console.log(`🗾 [Geocode 요청] ${url}`);
+  const { data } = await axios.get(url, { httpsAgent: agent });
+  return {
+    country: data.countryName,
+    prefecture: data.principalSubdivision,
+    city: data.locality,
+  };
+};
+
+// ✅ 메인 엔드포인트
 router.get("/nowWeather", async (req, res) => {
-  const city = req.query.city || "Nerima";
-
   try {
-    const url = `https://api.openweathermap.org/data/2.5/weather?q=${city}&appid=${API_KEY}&units=metric&lang=ja`;
-    const response = await axios.get(url);
-    const data = response.data;
+    let { city, lat, lon } = req.query;
+    const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.socket.remoteAddress;
+    let cacheKey = `${ip}_${city || `${lat}_${lon}`}`;
+
+    // 캐시 확인
+    const cached = cache.get(cacheKey);
+    if (cached) {
+      console.log(`🟢 [CACHE HIT] ${cacheKey}`);
+      return res.json(cached);
+    }
+
+    // 1️⃣ IP 기반 위치 감지
+    if (!lat || !lon) {
+      try {
+        const ip =
+          req.headers["x-forwarded-for"]?.split(",")[0] ||
+          req.socket.remoteAddress;
+
+        console.log(`🌏 클라이언트 IP: ${ip}`);
+        const ipUrl = `https://ipwho.is/${ip}`;
+        console.log(`🌐 [ipwho.is 요청] ${ipUrl}`);
+
+        const ipInfo = await axios.get(ipUrl, { httpsAgent: agent });
+
+        if (ipInfo.data.success) {
+          lat = ipInfo.data.latitude;
+          lon = ipInfo.data.longitude;
+          console.log(
+            `📍 ipwho.is 위치: ${ipInfo.data.country}, ${ipInfo.data.region}, ${ipInfo.data.city}`
+          );
+        } else {
+          throw new Error("IP 위치 감지 실패");
+        }
+      } catch (err) {
+        console.warn("⚠️ IP 감지 실패, 기본 위치(東京都 千代田区) 사용");
+        lat = DEFAULT_LAT;
+        lon = DEFAULT_LON;
+      }
+    }
+
+    // 2️⃣ BigDataCloud 역지오코딩
+    let geo = await reverseGeocode(lat, lon);
+
+    // 결과가 없거나 undefined일 경우 기본값으로 대체
+    if (!geo.city || !geo.prefecture) {
+      console.warn("⚠️ 역지오코딩 결과 없음, 기본 지역 사용");
+      geo = {
+        country: DEFAULT_COUNTRY,
+        prefecture: DEFAULT_PREF,
+        city: DEFAULT_CITY,
+      };
+    }
+
+    console.log(
+      `🗾 역지오코딩 결과: ${geo.prefecture} ${geo.city} (${geo.country})`
+    );
+
+    const cityForWeather = geo.city || geo.prefecture || "Tokyo";
+    const weather = await fetchWeather(cityForWeather, lat, lon);
 
     const result = {
-      // 날씨
+      ip_debug: { lat, lon, cityFromIP: geo.city },
+      location: {
+        prefecture: geo.prefecture,
+        city: geo.city,
+        country: geo.country,
+      },
       weather: {
-        description: data.weather[0].description, // 상세 설명
+        main: weather.weather[0].main,
+        description: weather.weather[0].description,
+        icon: weather.weather[0].icon,
+        iconUrl: `https://openweathermap.org/img/wn/${weather.weather[0].icon}@2x.png`,
       },
-
-      // 온도
-      main: {
-        temp: data.main.temp,              // 현재 온도
-        feels_like: data.main.feels_like,  // 체감 온도
-        temp_min: data.main.temp_min,      // 최저 기온
-        temp_max: data.main.temp_max,      // 최고 기온
-        pressure: data.main.pressure,      // 기압(hPa)
-        sea_level: data.main.sea_level,    // 해수면 기압(hPa)
-        grnd_level: data.main.grnd_level,  // 지상 기압(hPa)
-        humidity: data.main.humidity       // 습도(%)
-      },
-
-      // 바람
-      wind: {
-        speed: data.wind.speed,            // 풍속 (m/s)
-        deg: data.wind.deg,                // 풍향 (도)
-        gust: data.wind.gust               // 돌풍 (m/s)
-      },
-
-      // 구름
-      clouds: {
-        all: data.clouds.all               // 운량(%)
-      },
-
-      // 강수
-      rain: {
-        "1h": data.rain?.["1h"] || 0       // 최근 1시간 강수량(mm), 없으면 0
-      },
-      snow: {
-        "1h": data.snow?.["1h"] || 0       // 최근 1시간 적설량(mm), 없으면 0
-      },
-
-      // 시정
-      visibility: data.visibility,          // 시정(m)
-
-      // 시간 관련                       
-      dt: new Date(data.dt * 1000).toLocaleString("ja-JP", {
-      timeZone: "Asia/Tokyo",
-      hour12: false
-      }),
+      main: weather.main,
+      wind: weather.wind,
+      clouds: weather.clouds,
+      visibility: weather.visibility,
       sys: {
-        type: data.sys.type,
-        id: data.sys.id,
-        message: data.sys.message,
-        sunrise: new Date(data.sys.sunrise * 1000).toLocaleString("ja-JP", {
+        sunrise: new Date(weather.sys.sunrise * 1000).toLocaleString("ja-JP", {
           timeZone: "Asia/Tokyo",
-          hour12: false
+          hour12: false,
         }),
-        sunset: new Date(data.sys.sunset * 1000).toLocaleString("ja-JP", {
+        sunset: new Date(weather.sys.sunset * 1000).toLocaleString("ja-JP", {
           timeZone: "Asia/Tokyo",
-          hour12: false
-        })
+          hour12: false,
+        }),
       },
+      updatedAt: new Date().toISOString(),
     };
 
-    res.json(result);
-
-  } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: "날씨 정보를 가져오지 못했습니다." });
-  }
-});
-// /weather/todayWeather?city=마루마루 시간별 날씨 jmt 적용
-router.get("/hourWeather", async (req, res) => { 
-  const city = req.query.city || "Nerima";
-
-  try {
-    const url = `https://pro.openweathermap.org/data/2.5/forecast/hourly?q=${city}&appid=${API_KEY}&units=metric&lang=ja`;
-    const response = await axios.get(url);
-    const data = response.data;
-
-    // 그 다음에 list를 잘라서 map 실행
-    const sliced = data.list.slice(8, 29);
-
-    const result = sliced.map(item => ({
-      temp: item.main.temp,
-      feels_like: item.main.feels_like,
-      humidity: item.main.humidity,
-      wind_speed: item.wind.speed,
-      weather: item.weather[0].description,
-      cloudiness: item.clouds.all,
-      datetime: item.dt_txt
-    }));
-
-    res.json(result);
-
-  } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: "날씨 정보를 가져오지 못했습니다." });
-  }
-});
-// /weather/todayWeather?city=마루마루 오늘 날씨 jmt 적용
-router.get("/todayWeather", async (req, res) => {
-  const city = req.query.city || "Nerima";
-
-  try {
-    const url = `https://api.openweathermap.org/data/2.5/forecast/daily?q=${encodeURIComponent(
-      city
-    )}&cnt=1&appid=${API_KEY}&lang=ja&units=metric`;
-
-    const { data } = await axios.get(url);
-
-    const today = data.list?.[0]; // list 배열에서 오늘 날씨만
-
-    if (!today) {
-      return res.status(404).json({ error: "오늘 날씨 정보를 찾을 수 없습니다." });
-    }
-
-    const result = {
-      date: new Date(today.dt * 1000).toISOString().split("T")[0],
-      temp: today.temp.day,
-      temp_min: today.temp.min,
-      temp_max: today.temp.max,
-      feels_like: today.feels_like.day,
-      humidity: today.humidity,
-      pressure: today.pressure,
-      wind_speed: today.speed,
-      wind_deg: today.deg,
-      cloudiness: today.clouds,
-      weather: today.weather?.[0]?.description || "情報なし",
-      rain: today.rain ?? 0,
-      sunrise: new Date(today.sunrise * 1000).toLocaleString("ja-JP", {
-      timeZone: "Asia/Tokyo",
-      hour12: false
-      }),
-      sunset: new Date(today.sunset * 1000).toLocaleString("ja-JP", {
-      timeZone: "Asia/Tokyo",
-      hour12: false
-      })
-    };
-
+    cache.put(cacheKey, result, CACHE_TIME);
+    console.log(`🟡 [API FETCH 완료] ${cityForWeather}`);
     res.json(result);
   } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: "날씨 정보를 가져오지 못했습니다." });
+    console.error("❌ nowWeather Error:", err.message);
+    res.status(500).json({ error: err.message });
   }
 });
-// /weather/todayWeather?city=마루마루 주간 날씨 jmt 적용
-router.get("/dailyWeather", async (req, res) => {
-  const city = req.query.city || "Nerima";
-
-  try {
-    const url = `https://api.openweathermap.org/data/2.5/forecast/daily?q=${encodeURIComponent(
-      city
-    )}&cnt=10&appid=${API_KEY}&lang=ja&units=metric`;
-
-    const { data } = await axios.get(url);
-
-    const list = data.list?.slice(1); // 오늘 제외, 2~10일차
-
-    if (!list || list.length === 0) {
-      return res.status(404).json({ error: "예보 정보를 찾을 수 없습니다." });
-    }
-
-    const formatJST = (unix) =>
-      new Date(unix * 1000).toLocaleString("ja-JP", {
-        timeZone: "Asia/Tokyo",
-        hour12: false
-      });
-
-    const result = list.map((day) => ({
-      date: new Date(day.dt * 1000).toISOString().split("T")[0],
-      temp: day.temp.day,
-      temp_min: day.temp.min,
-      temp_max: day.temp.max,
-      feels_like: day.feels_like.day,
-      humidity: day.humidity,
-      pressure: day.pressure,
-      wind_speed: day.speed,
-      wind_deg: day.deg,
-      cloudiness: day.clouds,
-      weather: day.weather?.[0]?.description || "情報なし",
-      rain: day.rain ?? 0,
-      sunrise: formatJST(day.sunrise),
-      sunset: formatJST(day.sunset)
-    }));
-
-    res.json(result);
-  } catch (err) {
-    console.error(err.response?.data || err.message);
-    res.status(500).json({ error: "날씨 정보를 가져오지 못했습니다." });
-  }
-});
-
-
 
 export default router;

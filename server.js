@@ -2,7 +2,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import weatherRouter from "./routes/weather.js"; // 라우터 import
+import weatherRouter from "./routes/weather.js";
 
 dotenv.config();
 const app = express();
@@ -19,7 +19,7 @@ app.get("/", (req, res) => {
 app.use("/weather", weatherRouter);
 
 // 서버 실행
-const PORT = process.env.PORT || 3003;
+const PORT = process.env.PORT || 3002;
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
