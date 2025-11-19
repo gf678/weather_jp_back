@@ -47,12 +47,21 @@ const reverseGeocode = async (lat, lon) => {
   };
 };
 
+// IP 정규화 함수
+const normalizeIp = (ip) => {
+  if (!ip) return ip;
+  return ip.replace(/^::ffff:/, ""); // IPv6-mapped IPv4 제거
+};
+
 // ✅ 메인 엔드포인트
 router.get("/nowWeather", async (req, res) => {
   try {
     let { city, lat, lon } = req.query;
-    const ip = req.headers["x-forwarded-for"]?.split(",")[0] || req.socket.remoteAddress;
-    let cacheKey = `${ip}_${city || `${lat}_${lon}`}`;
+    let ipRaw =
+      req.headers["x-forwarded-for"]?.split(",")[0] ||
+      req.socket.remoteAddress;
+
+    const ip = normalizeIp(ipRaw);    let cacheKey = `${ip}_${city || `${lat}_${lon}`}`;
 
     // 캐시 확인
     const cached = cache.get(cacheKey);
@@ -60,14 +69,11 @@ router.get("/nowWeather", async (req, res) => {
       console.log(`🟢 [CACHE HIT] ${cacheKey}`);
       return res.json(cached);
     }
-
+    
     // 1️⃣ IP 기반 위치 감지
     if (!lat || !lon) {
       try {
-        const ip =
-          req.headers["x-forwarded-for"]?.split(",")[0] ||
-          req.socket.remoteAddress;
-
+        // ❗ 여기서도 절대 다시 IP를 가져오지 않기
         console.log(`🌏 클라이언트 IP: ${ip}`);
         const ipUrl = `https://ipwho.is/${ip}`;
         console.log(`🌐 [ipwho.is 요청] ${ipUrl}`);

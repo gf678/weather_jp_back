@@ -19,7 +19,7 @@ app.get("/", (req, res) => {
 app.use("/weather", weatherRouter);
 
 // 서버 실행
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3003;
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
